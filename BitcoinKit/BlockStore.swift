@@ -9,6 +9,19 @@
 import Foundation
 import SQLite3
 
+public struct Payment {
+    public enum State {
+        case sent
+        case received
+    }
+
+    public let state: State
+    public let amount: Int64
+    public let from: Address
+    public let to: Address
+    public let transactionHash: Data
+}
+
 public protocol BlockStore {
     func addBlock(_ block: BlockMessage, hash: Data) throws
     func addMerkleBlock(_ merkleBlock: MerkleBlockMessage, hash: Data) throws
@@ -28,7 +41,7 @@ public class SQLiteBlockStore : BlockStore {
     let network: Network
 
     private var database: OpaquePointer?
-    private var statements = [OpaquePointer?]()
+    private var statements = [String: OpaquePointer!]()
 
     public init(file: URL, network: Network = .testnet) throws {
         self.network = network
@@ -85,6 +98,10 @@ public class SQLiteBlockStore : BlockStore {
                                    address_id TEXT,
                                    FOREIGN KEY(tx_id) REFERENCES tx(id)
                                );
+                               CREATE VIEW IF NOT EXISTS view_tx AS
+                                  SELECT tx.id, txout.address_id, txout.value, txin.txout_id from tx
+                                  LEFT JOIN txout on id = txout.tx_id
+                                  LEFT JOIN txin on id = txin.txout_id;
                                CREATE VIEW IF NOT EXISTS view_utxo AS
                                   SELECT tx.id, txout.address_id, txout.value, txin.txout_id from tx
                                   LEFT JOIN txout on id = txout.tx_id
@@ -94,36 +111,143 @@ public class SQLiteBlockStore : BlockStore {
                                nil,
                                nil,
                                nil) }
+
+        statements["addBlock"] = try {
+            var statement: OpaquePointer?
+            try execute { sqlite3_prepare_v2(database,
+                                             """
+                                             REPLACE INTO block
+                                                 (id, version, prev_block, merkle_root, timestamp, bits, nonce, txn_count)
+                                                 VALUES
+                                                 (?,  ?,       ?,          ?,           ?,         ?,    ?,     ?);
+                                             """,
+                                             -1,
+                                             &statement,
+                                             nil) }
+            return statement
+        }()
+        statements["addMerkleBlock"] = try {
+            var statement: OpaquePointer?
+            try execute { sqlite3_prepare_v2(database,
+                                             """
+                                             REPLACE INTO merkleblock
+                                                 (id, version, prev_block, merkle_root, timestamp, bits, nonce, total_transactions, hash_count, hashes, flag_count, flags)
+                                                 VALUES
+                                                 (?,  ?,       ?,          ?,           ?,         ?,    ?,     ?,                  ?,          ?,      ?,          ?);
+                                             """,
+                                             -1,
+                                             &statement,
+                                             nil) }
+            return statement
+        }()
+        statements["addTransaction"] = try {
+            var statement: OpaquePointer?
+            try execute { sqlite3_prepare_v2(database,
+                                             """
+                                             REPLACE INTO tx
+                                                 (id, version, flag, tx_in_count, tx_out_count, lock_time)
+                                                 VALUES
+                                                 (?,  ?,       ?,    ?,           ?,            ?);
+                                             """,
+                                             -1,
+                                             &statement,
+                                             nil) }
+            return statement
+        }()
+        statements["addTransactionInput"] = try {
+            var statement: OpaquePointer?
+            try execute { sqlite3_prepare_v2(database,
+                                             """
+                                             INSERT INTO txin
+                                                 (script_length, signature_script, sequence, tx_id, txout_id)
+                                                 VALUES
+                                                 (?,             ?,                ?,        ?,     ?);
+                                             """,
+                                             -1,
+                                             &statement,
+                                             nil) }
+            return statement
+        }()
+        statements["addTransactionOutput"] = try {
+            var statement: OpaquePointer?
+            try execute { sqlite3_prepare_v2(database,
+                                             """
+                                             INSERT INTO txout
+                                                 (value, pk_script_length, pk_script, tx_id, address_id)
+                                                 VALUES
+                                                 (?,     ?,                ?,         ?,     ?);
+                                             """,
+                                             -1,
+                                             &statement,
+                                             nil) }
+            return statement
+        }()
+        statements["deleteTransactionInput"] = try {
+            var statement: OpaquePointer?
+            try execute { sqlite3_prepare_v2(database,
+                                             """
+                                             DELETE FROM txin WHERE tx_id = ?;
+                                             """,
+                                             -1,
+                                             &statement,
+                                             nil) }
+            return statement
+        }()
+        statements["deleteTransactionOutput"] = try {
+            var statement: OpaquePointer?
+            try execute { sqlite3_prepare_v2(database,
+                                             """
+                                             DELETE FROM txout WHERE tx_id = ?;
+                                             """,
+                                             -1,
+                                             &statement,
+                                             nil) }
+            return statement
+        }()
+        statements["calculateBlance"] = try {
+            var statement: OpaquePointer?
+            try execute { sqlite3_prepare_v2(database,
+                                             """
+                                             SELECT value FROM view_utxo WHERE address_id == ?;
+                                             """,
+                                             -1,
+                                             &statement,
+                                             nil) }
+            return statement
+        }()
+        statements["transactions"] = try {
+            var statement: OpaquePointer?
+            try execute { sqlite3_prepare_v2(database,
+                                             """
+                                             SELECT * FROM view_tx WHERE address_id == ?;
+                                             """,
+                                             -1,
+                                             &statement,
+                                             nil) }
+            return statement
+        }()
+        statements["latestBlockHash"] = try {
+            var statement: OpaquePointer?
+            try execute { sqlite3_prepare_v2(database,
+                                             """
+                                             SELECT id FROM merkleblock ORDER BY timestamp DESC LIMIT 1;
+                                             """,
+                                             -1,
+                                             &statement,
+                                             nil) }
+            return statement
+        }()
     }
 
     deinit {
-        for statement in statements {
+        for statement in statements.values {
             try! execute { sqlite3_finalize(statement) }
         }
         try! execute { sqlite3_close(database) }
     }
 
     public func addBlock(_ block: BlockMessage, hash: Data) throws {
-        struct PreparedStatement {
-            static var statement: OpaquePointer?
-            static var initialized = false
-        }
-        if !PreparedStatement.initialized {
-            try execute { sqlite3_prepare_v2(database,
-                                          """
-                                          REPLACE INTO block
-                                              (id, version, prev_block, merkle_root, timestamp, bits, nonce, txn_count)
-                                              VALUES
-                                              (?,  ?,       ?,          ?,           ?,         ?,    ?,     ?);
-                                          """,
-                                          -1,
-                                          &PreparedStatement.statement,
-                                          nil) }
-            statements.append(PreparedStatement.statement)
-            PreparedStatement.initialized = true
-        }
-
-        let stmt = PreparedStatement.statement
+        let stmt = statements["addBlock"]
 
         try execute { hash.withUnsafeBytes { sqlite3_bind_blob(stmt, 1, $0, Int32(hash.count), SQLITE_TRANSIENT) } }
         try execute { sqlite3_bind_int64(stmt, 2, sqlite3_int64(bitPattern: UInt64(truncatingIfNeeded: block.version))) }
@@ -139,26 +263,7 @@ public class SQLiteBlockStore : BlockStore {
     }
 
     public func addMerkleBlock(_ merkleBlock: MerkleBlockMessage, hash: Data) throws {
-        struct PreparedStatement {
-            static var statement: OpaquePointer?
-            static var initialized = false
-        }
-        if !PreparedStatement.initialized {
-            try execute { sqlite3_prepare_v2(database,
-                                          """
-                                          REPLACE INTO merkleblock
-                                              (id, version, prev_block, merkle_root, timestamp, bits, nonce, total_transactions, hash_count, hashes, flag_count, flags)
-                                              VALUES
-                                              (?,  ?,       ?,          ?,           ?,         ?,    ?,     ?,                  ?,          ?,      ?,          ?);
-                                          """,
-                                          -1,
-                                          &PreparedStatement.statement,
-                                          nil) }
-            statements.append(PreparedStatement.statement)
-            PreparedStatement.initialized = true
-        }
-
-        let stmt = PreparedStatement.statement
+        let stmt = statements["addMerkleBlock"]
 
         try execute { hash.withUnsafeBytes { sqlite3_bind_blob(stmt, 1, $0, Int32(hash.count), SQLITE_TRANSIENT) } }
         try execute { sqlite3_bind_int64(stmt, 2, sqlite3_int64(bitPattern: UInt64(truncatingIfNeeded: merkleBlock.version))) }
@@ -180,26 +285,7 @@ public class SQLiteBlockStore : BlockStore {
     }
 
     public func addTransaction(_ transaction: Transaction, hash: Data) throws {
-        struct PreparedStatement {
-            static var statement: OpaquePointer?
-            static var initialized = false
-        }
-        if !PreparedStatement.initialized {
-            try execute { sqlite3_prepare_v2(database,
-                                          """
-                                          REPLACE INTO tx
-                                              (id, version, flag, tx_in_count, tx_out_count, lock_time)
-                                              VALUES
-                                              (?,  ?,       ?,    ?,           ?,            ?);
-                                          """,
-                                          -1,
-                                          &PreparedStatement.statement,
-                                          nil) }
-            statements.append(PreparedStatement.statement)
-            PreparedStatement.initialized = true
-        }
-
-        let stmt = PreparedStatement.statement
+        let stmt = statements["addTransaction"]
 
         try execute { hash.withUnsafeBytes { sqlite3_bind_blob(stmt, 1, $0, Int32(hash.count), SQLITE_TRANSIENT) } }
         try execute { sqlite3_bind_int64(stmt, 2, sqlite3_int64(bitPattern: UInt64(truncatingIfNeeded: transaction.version))) }
@@ -211,35 +297,18 @@ public class SQLiteBlockStore : BlockStore {
         try executeUpdate { sqlite3_step(stmt) }
         try execute { sqlite3_reset(stmt) }
 
+        try deleteTransactionInput(txId: hash)
         for input in transaction.inputs {
             try addTransactionInput(input, txId: hash)
         }
+        try deleteTransactionOutput(txId: hash)
         for output in transaction.outputs {
             try addTransactionOutput(output, txId: hash)
         }
     }
 
     public func addTransactionInput(_ input: TransactionInput, txId: Data) throws {
-        struct PreparedStatement {
-            static var statement: OpaquePointer?
-            static var initialized = false
-        }
-        if !PreparedStatement.initialized {
-            try execute { sqlite3_prepare_v2(database,
-                                          """
-                                          REPLACE INTO txin
-                                              (script_length, signature_script, sequence, tx_id, txout_id)
-                                              VALUES
-                                              (?,             ?,                ?,        ?,     ?);
-                                          """,
-                                          -1,
-                                          &PreparedStatement.statement,
-                                          nil) }
-            statements.append(PreparedStatement.statement)
-            PreparedStatement.initialized = true
-        }
-
-        let stmt = PreparedStatement.statement
+        let stmt = statements["addTransactionInput"]
 
         try execute { sqlite3_bind_int64(stmt, 1, sqlite3_int64(bitPattern: input.scriptLength.underlyingValue)) }
         try execute { input.signatureScript.withUnsafeBytes { sqlite3_bind_blob(stmt, 2, $0, Int32(input.signatureScript.count), SQLITE_TRANSIENT) } }
@@ -252,26 +321,7 @@ public class SQLiteBlockStore : BlockStore {
     }
 
     public func addTransactionOutput(_ output: TransactionOutput, txId: Data) throws {
-        struct PreparedStatement {
-            static var statement: OpaquePointer?
-            static var initialized = false
-        }
-        if !PreparedStatement.initialized {
-            try execute { sqlite3_prepare_v2(database,
-                                          """
-                                          INSERT INTO txout
-                                              (value, pk_script_length, pk_script, tx_id, address_id)
-                                              VALUES
-                                              (?,     ?,                ?,         ?,     ?);
-                                          """,
-                                          -1,
-                                          &PreparedStatement.statement,
-                                          nil) }
-            statements.append(PreparedStatement.statement)
-            PreparedStatement.initialized = true
-        }
-
-        let stmt = PreparedStatement.statement
+        let stmt = statements["addTransactionOutput"]
 
         try execute { sqlite3_bind_int64(stmt, 1, sqlite3_int64(bitPattern: UInt64(truncatingIfNeeded: output.value))) }
         try execute { sqlite3_bind_int64(stmt, 2, sqlite3_int64(bitPattern: output.scriptLength.underlyingValue)) }
@@ -287,52 +337,55 @@ public class SQLiteBlockStore : BlockStore {
         try execute { sqlite3_reset(stmt) }
     }
 
-    public func calculateBlance(address: Address) throws -> Int64 {
-        struct PreparedStatement {
-            static var statement: OpaquePointer?
-            static var initialized = false
-        }
-        if !PreparedStatement.initialized {
-            try execute { sqlite3_prepare_v2(database,
-                                          """
-                                          SELECT value FROM view_utxo WHERE address_id == ?;
-                                          """,
-                                          -1,
-                                          &PreparedStatement.statement,
-                                          nil) }
-            statements.append(PreparedStatement.statement)
-            PreparedStatement.initialized = true
-        }
+    private func deleteTransactionInput(txId: Data) throws {
+        let stmt = statements["deleteTransactionInput"]
+        try execute { txId.withUnsafeBytes { sqlite3_bind_blob(stmt, 1, $0, Int32(txId.count), SQLITE_TRANSIENT) } }
+        try executeUpdate { sqlite3_step(stmt) }
+        try execute { sqlite3_reset(stmt) }
+    }
 
-        let stmt = PreparedStatement.statement
-        try execute { sqlite3_bind_text(stmt, 1, address.base58, -1, nil) }
+    private func deleteTransactionOutput(txId: Data) throws {
+        let stmt = statements["deleteTransactionOutput"]
+        try execute { txId.withUnsafeBytes { sqlite3_bind_blob(stmt, 1, $0, Int32(txId.count), SQLITE_TRANSIENT) } }
+        try executeUpdate { sqlite3_step(stmt) }
+        try execute { sqlite3_reset(stmt) }
+    }
+
+    public func calculateBlance(address: Address) throws -> Int64 {
+        let stmt = statements["calculateBlance"]
+        try execute { sqlite3_bind_text(stmt, 1, address.base58, -1, SQLITE_TRANSIENT) }
 
         var balance: Int64 = 0
         while sqlite3_step(stmt) == SQLITE_ROW {
             let value = sqlite3_column_int64(stmt, 0)
             balance += value
         }
+
+        try execute { sqlite3_reset(stmt) }
+
         return balance
     }
 
-    public func latestBlockHash() throws -> Data? {
-        struct PreparedStatement {
-            static var statement: OpaquePointer?
-            static var initialized = false
-        }
-        if !PreparedStatement.initialized {
-            try execute { sqlite3_prepare_v2(database,
-                                          """
-                                          SELECT id FROM merkleblock ORDER BY timestamp DESC LIMIT 1
-                                          """,
-                                          -1,
-                                          &PreparedStatement.statement,
-                                          nil) }
-            statements.append(PreparedStatement.statement)
-            PreparedStatement.initialized = true
+    public func transactions(address: Address) throws -> [Payment] {
+        let stmt = statements["transactions"]
+        try execute { sqlite3_bind_text(stmt, 1, address.base58, -1, SQLITE_TRANSIENT) }
+
+        var payments = [Payment]()
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            let hash = sqlite3_column_blob(stmt, 0)
+            let address = sqlite3_column_text(stmt, 1)!
+            let value = sqlite3_column_int64(stmt, 2)
+
+            payments.append(Payment(state: .received, amount: value, from: try! Address(String(cString: address)), to: try! Address(String(cString: address)), transactionHash: Data(bytes: hash!, count: 32)))
         }
 
-        let stmt = PreparedStatement.statement
+        try execute { sqlite3_reset(stmt) }
+
+        return payments
+    }
+
+    public func latestBlockHash() throws -> Data? {
+        let stmt = statements["latestBlockHash"]
 
         var hash: UnsafeRawPointer?
         if sqlite3_step(stmt) == SQLITE_ROW {

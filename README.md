@@ -1,5 +1,10 @@
 BitcoinKit
 ===========
+[![CI Status](http://img.shields.io/travis/kishikawakatsumi/BitcoinKit.svg)](https://travis-ci.org/kishikawakatsumi/BitcoinKit)
+[![codecov](https://codecov.io/gh/kishikawakatsumi/BitcoinKit/branch/master/graph/badge.svg)](https://codecov.io/gh/kishikawakatsumi/BitcoinKit)
+[![Carthage compatible](https://img.shields.io/badge/Carthage-compatible-4BC51D.svg?style=flat)](https://github.com/Carthage/Carthage)
+[![Version](https://img.shields.io/cocoapods/v/BitcoinKit.svg)](http://cocoadocs.org/docsets/BitcoinKit)
+[![Platform](https://img.shields.io/cocoapods/p/BitcoinKit.svg)](http://cocoadocs.org/docsets/BitcoinKit)
 
 BitcoinKit implements Bitcoin protocol in Swift. It is an implementation of the Bitcoin SPV protocol written (almost) entirely in swift.
 
@@ -15,15 +20,6 @@ Features
 - EC keys and signatures.
 - BIP32, BIP44 hierarchical deterministic wallets.
 - BIP39 implementation.
-
-Initial Setup
--------------
-
-#### Build dependencies
-
-```
-sh ./setup/build_libraries.sh
-```
 
 Usage
 -----
@@ -71,6 +67,14 @@ let m01prv = try! m0prv.derived(at: 1)
 let m012prv = try! m01prv.derived(at: 2, hardened: true)
 ```
 
+#### HD Wallet Key derivation
+
+```
+let keychain = HDKeychain(seed: seed, network: .mainnet)
+let privateKey = try! keychain.derivedKey(path: "m/44'/1'/0'/0/0")
+...
+```
+
 #### Extended Keys
 
 ```
@@ -98,6 +102,16 @@ BitcoinKit is available through [Carthage](https://github.com/Carthage/Carthage)
 it, simply add the following line to your Cartfile:
 
 `github "kishikawakatsumi/BitcoinKit"`
+
+### CocoaPods
+
+BitcoinKit is available through [CocoaPods](http://cocoapods.org). To install
+it, simply add the following lines to your Podfile:
+
+```ruby
+use_frameworks!
+pod 'BitcoinKit'
+```
 
 Contribute
 ----------
